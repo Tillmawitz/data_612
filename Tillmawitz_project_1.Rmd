@@ -1,0 +1,143 @@
+---
+title: "Data 612 Project 1"
+author: "Matthew Tillmawitz"
+date: "2025-06-04"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(kableExtra)
+```
+
+The dataset for this project will be a toy dataset representing product reviews of 5 different products labeled "A" through "E" by different users. The users and products have varying numbers of missing reviews, and the review values themselves are designed to reflect the tendency of people to avoid the bottom range of values in rating scales. The scale ranges from 0-5 and allows for half steps in the ratings. We will be building a simple recommender that will generate product recommendations for users.
+
+```{r make dataset}
+df <- tribble(
+  ~Name, ~A, ~B, ~C, ~D, ~E,
+  "Alice", 4.5, 5.0, NA, 4.5, 4.5,
+  "Bob", 4.5, 4.5, NA, 3.0, 4.5,
+  "Carol", 3.5, NA, 3.5, 2.0, 3.5,
+  "David", NA, 4.0, 3.5, 2.5, 3.5,
+  "Emma", 4.5, 5.0, NA, 3.0, 4.0,
+  "Frank", 3.5, 3.5, 3.0, NA, 3.0,
+  "Grace", 4.5, 4.0, 3.5, NA, 4.5,
+  "Henry", NA, 3.5, 2.5, 2.5, 3.5,
+  "Iris", 4.0, NA, 4.0, 3.5, 4.5,
+  "Jack", 3.5, 4.0,  3.5,  3.0, 3.5
+)
+
+df |>
+  kbl(caption = "User Product Ratings") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+When breaking the data into training and testing sets we want to treat each user-item pair as its own row. This ensures that we create a train-test split that has data for each user and item. We exclude the missing values, as they do not make sense for the test set and provide no predictive value in the training set.
+
+```{r split}
+set.seed(8675309)
+
+long_df <- df |>
+  pivot_longer(cols = A:E,
+               names_to = "Item",
+               values_to = "Rating") |>
+  filter(!is.na(Rating)) # No NAs, no imputation needed for project
+
+train_index <- createDataPartition(y = 1:nrow(long_df),
+                                   p = 0.8,
+                                   list = FALSE)
+
+train_pairs <- long_df[train_index,]
+test_pairs <- long_df[-train_index,]
+```
+
+We can see the averages of each user's ratings as well as each item's average rating in the below tables. The averages are from the data in the training set only.
+
+```{r averages}
+avg_product <- train_pairs |>
+  group_by(Item) |>
+  summarise(average = mean(Rating))
+
+avg_user <- train_pairs |>
+  group_by(Name) |>
+  summarise(average = mean(Rating))
+
+avg_user |>
+  kbl(caption = "Average Rating by User") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+avg_product |>
+  kbl(caption = "Average Rating by Product") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Using raw averages as a baseline value we can see the RMSE on both the training and test sets are not particularly good being off by between a half and full step in the rating scale. The test set has worse performance, as would be expected. Given that the dataset was intentially constructed to have an uneven distribution of ratings across the possible scale, the performance is even worse than one would initially assume.
+
+```{r baseline average RMSE}
+baseline_rmse_test <- sqrt(mean((test_pairs$Rating - mean(train_pairs$Rating))^2))
+baseline_rmse_train <- sqrt(mean((train_pairs$Rating - mean(train_pairs$Rating))^2))
+
+rmse_df <- tribble(
+  ~Prediction, ~RMSE,
+  "Raw Average Training", baseline_rmse_train,
+  "Raw Average Test", baseline_rmse_test
+)
+
+rmse_df |>
+  kbl(caption = "RMSE of Predicted Ratings") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+To improve performance we can calculate the bias of each user and item to construct baseline predictors for the different user-item pairs.
+
+```{r user bias}
+user_bias <- avg_user |>
+  mutate(user_bias = average - mean(train_pairs$Rating)) |>
+  select(Name, user_bias)
+
+user_bias |>
+  kbl(caption = "User Bias Values") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r item bias}
+item_bias <- avg_product |>
+  mutate(item_bias = average - mean(train_pairs$Rating)) |>
+  select(Item, item_bias)
+
+item_bias |>
+  kbl(caption = "Item Bias Values") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+By including the User and Item bias values to produce baseline predictors we can improve the RMSE of our predictions significantly. The RMSE of the predictions on both the training and test sets is approximately halved compared to the raw average predictions.
+
+```{r baseline predictions}
+train_predictions <- train_pairs |>
+  left_join(user_bias, by = "Name") |>
+  left_join(item_bias, by = "Item") |>
+  mutate(predicted_rating = mean(train_pairs$Rating) + user_bias + item_bias)
+
+test_predictions <- test_pairs |>
+  left_join(user_bias, by = "Name") |>
+  left_join(item_bias, by = "Item") |>
+  mutate(predicted_rating = mean(train_pairs$Rating) + user_bias + item_bias)
+```
+
+```{r baseline rmse}
+bias_rmse_train <-  sqrt(mean((train_predictions$Rating - train_predictions$predicted_rating)^2))
+bias_rmse_test <- sqrt(mean((test_predictions$Rating - test_predictions$predicted_rating)^2))
+
+rmse_df |>
+  add_row(Prediction = "Training Baseline Predictor", RMSE = bias_rmse_train) |>
+  add_row(Prediction = "Testing Baseline Predictor", RMSE = bias_rmse_test) |>
+  kbl(caption = "RMSE of Predicted Ratings") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+
+
