@@ -150,7 +150,7 @@ rmse_df |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
 ```
 
-While the baseline predictors see a significant improvement in accuracy as measured by RMSE, the performance on the testing set is still not stellar at almost a half step in the rating scale. While baseline predictors are an improvement on simple averages, they have several shortcomings. They are vulnerable to missingness, and as a result different samples of the data can have very different bias values. The tables below demonstrate this phenomena, comparing the bias values of the original sample to a new sample of the data. Additionally, simple bias adjustments do not capture more nuanced relationships in the data such as similarities between users or items which could improve estimates in situations where data is scarce.
+While the baseline predictors see a significant improvement in accuracy as measured by RMSE, the performance on the testing set is still not stellar at almost a half step in the rating scale. While baseline predictors are an improvement on simple averages, they have several shortcomings. They are vulnerable to missingness, and as a result different samples of the data can have very different bias values. The tables below demonstrate this phenomena, comparing the bias values of the original sample to a new sample of the data and as we can see from the bias difference of Carol and Item E the swings due to sampling and missingness can be extreme. Additionally, simple bias adjustments do not capture more nuanced relationships in the data such as similarities between users or items which could improve estimates in situations where data is scarce.
 
 ```{r split two}
 set.seed(25637)
@@ -163,11 +163,19 @@ train_index_repeat <- createDataPartition(y = 1:nrow(long_df),
 train_pairs_repeat <- long_df[train_index_repeat,]
 test_pairs_repeat <- long_df[-train_index_repeat,]
 
-user_bias_repeat <- avg_user |>
+avg_user_repeat <- train_pairs_repeat |>
+  group_by(Name) |>
+  summarise(average = mean(Rating))
+
+avg_product_repeat <- train_pairs_repeat |>
+  group_by(Item) |>
+  summarise(average = mean(Rating))
+
+user_bias_repeat <- avg_user_repeat |>
   mutate(user_bias_repeat = average - mean(train_pairs_repeat$Rating)) |>
   select(Name, user_bias_repeat)
 
-item_bias_repeat <- avg_product |>
+item_bias_repeat <- avg_product_repeat |>
   mutate(item_bias_repeat = average - mean(train_pairs_repeat$Rating)) |>
   select(Item, item_bias_repeat)
 
