@@ -669,6 +669,8 @@ display: none;
 </div>
 
 
+<div id="creating-a-dataset" class="section level1">
+<h1>Creating A Dataset</h1>
 <p>The dataset for this project will be a toy dataset representing
 product reviews of 5 different products labeled “A” through “E” by
 different users. The users and products have varying numbers of missing
@@ -945,6 +947,9 @@ train_index &lt;- createDataPartition(y = 1:nrow(long_df),
 
 train_pairs &lt;- long_df[train_index,]
 test_pairs &lt;- long_df[-train_index,]</code></pre>
+</div>
+<div id="calculating-averages" class="section level1">
+<h1>Calculating Averages</h1>
 <p>We can see the averages of each user’s ratings as well as each item’s
 average rating in the below tables. The averages are from the data in
 the training set only.</p>
@@ -1118,12 +1123,15 @@ E
 </tr>
 </tbody>
 </table>
-<p>Using raw averages as a baseline value we can see the RMSE on both
-the training and test sets are not particularly good being off by
-between a half and full step in the rating scale. The test set has worse
-performance, as would be expected. Given that the dataset was
-intentionally constructed to have an uneven distribution of ratings
-across the possible scale, the performance is even worse than one would
+<p>Using raw averages as a blanket prediction we can calculate the RMSE
+on both the training and test sets to set a reference point for model
+accuracy. Any model we develop should have a smaller RMSE than this
+value in order to be useful. The RMSE on both the training and test sets
+are not particularly good, being off by between a half and full step in
+the rating scale. The test set has worse performance, as would be
+expected. Given that the dataset was intentionally constructed to have
+an uneven distribution of ratings across the possible scale, with no
+scores below a 2.0, the performance is even worse than one would
 initially assume.</p>
 <pre class="r"><code># Calculating RMSE of average score estimates
 baseline_rmse_test &lt;- sqrt(mean((test_pairs$Rating - mean(train_pairs$Rating))^2))
@@ -1172,10 +1180,15 @@ Raw Average Test
 </tr>
 </tbody>
 </table>
+</div>
+<div id="incorporating-user-and-item-bias" class="section level1">
+<h1>Incorporating User and Item Bias</h1>
 <p>To improve performance we can calculate the bias of each user and
-item to construct baseline predictors for the different user-item
-pairs.</p>
-<pre class="r"><code># Calcualting user bias scores
+item to construct baseline predictors for the different user-item pairs.
+The bias is how much the average rating of each item or user differs
+from the average of the entire dataset, which we can use to adjust our
+estimates for each user-item pair.</p>
+<pre class="r"><code># Calculating user bias scores
 user_bias &lt;- avg_user |&gt;
   mutate(user_bias = average - mean(train_pairs$Rating)) |&gt;
   select(Name, user_bias)
@@ -1345,7 +1358,11 @@ E
 </tr>
 </tbody>
 </table>
-<p>By including the User and Item bias values to produce baseline
+<p>We can now generate baseline predictions by adding the item and user
+bias values to the set-wide average for each item-user pair. These
+baseline estimators are a much better starting point for a recommender,
+as they more accurately capture the variance in user and item ratings.
+By including the User and Item bias values to produce baseline
 predictors we can improve the RMSE of our predictions significantly. The
 RMSE of the predictions on both the training and test sets is
 approximately halved compared to the raw average predictions.</p>
@@ -1418,6 +1435,893 @@ Testing Baseline Predictor
 </tr>
 </tbody>
 </table>
+</div>
+<div id="analyzing-baseline-predictor-performance" class="section level1">
+<h1>Analyzing Baseline Predictor Performance</h1>
+<p>While the baseline predictors see a significant improvement in
+accuracy as measured by RMSE, the performance on the testing set is
+still not stellar at almost a half step in the rating scale. While
+baseline predictors are an improvement on simple averages, they have
+several shortcomings. They are vulnerable to missingness, and as a
+result different samples of the data can have very different bias
+values. The tables below demonstrate this phenomena, comparing the bias
+values of the original sample to a new sample of the data and as we can
+see from the bias difference of Carol and Item E the swings due to
+sampling and missingness can be extreme. Additionally, simple bias
+adjustments do not capture more nuanced relationships in the data such
+as similarities between users or items which could improve estimates in
+situations where data is scarce.</p>
+<pre class="r"><code>set.seed(25637)
+
+# Breaking data into train-test split for a second time
+train_index_repeat &lt;- createDataPartition(y = 1:nrow(long_df),
+                                   p = 0.8,
+                                   list = FALSE)
+
+train_pairs_repeat &lt;- long_df[train_index_repeat,]
+test_pairs_repeat &lt;- long_df[-train_index_repeat,]
+
+avg_user_repeat &lt;- train_pairs_repeat |&gt;
+  group_by(Name) |&gt;
+  summarise(average = mean(Rating))
+
+avg_product_repeat &lt;- train_pairs_repeat |&gt;
+  group_by(Item) |&gt;
+  summarise(average = mean(Rating))
+
+user_bias_repeat &lt;- avg_user_repeat |&gt;
+  mutate(user_bias_repeat = average - mean(train_pairs_repeat$Rating)) |&gt;
+  select(Name, user_bias_repeat)
+
+item_bias_repeat &lt;- avg_product_repeat |&gt;
+  mutate(item_bias_repeat = average - mean(train_pairs_repeat$Rating)) |&gt;
+  select(Item, item_bias_repeat)
+
+user_bias |&gt;
+  left_join(user_bias_repeat, join_by(Name)) |&gt;
+  mutate(`Absolute Difference` = abs(user_bias_repeat - user_bias),
+         `Percent Difference` = abs(((user_bias_repeat - user_bias) / user_bias)) * 100) |&gt;
+  kbl(caption = &quot;Comparison of Different Sampling on User Bias&quot;) |&gt;
+  kable_styling(bootstrap_options = c(&quot;striped&quot;, &quot;hover&quot;, &quot;condensed&quot;))</code></pre>
+<table class="table table-striped table-hover table-condensed" style="color: black; margin-left: auto; margin-right: auto;">
+<caption>
+Comparison of Different Sampling on User Bias
+</caption>
+<thead>
+<tr>
+<th style="text-align:left;">
+Name
+</th>
+<th style="text-align:right;">
+user_bias
+</th>
+<th style="text-align:right;">
+user_bias_repeat
+</th>
+<th style="text-align:right;">
+Absolute Difference
+</th>
+<th style="text-align:right;">
+Percent Difference
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left;">
+Alice
+</td>
+<td style="text-align:right;">
+0.7727273
+</td>
+<td style="text-align:right;">
+1.0000000
+</td>
+<td style="text-align:right;">
+0.2272727
+</td>
+<td style="text-align:right;">
+29.41176
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Bob
+</td>
+<td style="text-align:right;">
+0.3977273
+</td>
+<td style="text-align:right;">
+0.3333333
+</td>
+<td style="text-align:right;">
+0.0643939
+</td>
+<td style="text-align:right;">
+16.19048
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Carol
+</td>
+<td style="text-align:right;">
+-0.2272727
+</td>
+<td style="text-align:right;">
+-0.6666667
+</td>
+<td style="text-align:right;">
+0.4393939
+</td>
+<td style="text-align:right;">
+193.33333
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+David
+</td>
+<td style="text-align:right;">
+-0.3939394
+</td>
+<td style="text-align:right;">
+-0.2916667
+</td>
+<td style="text-align:right;">
+0.1022727
+</td>
+<td style="text-align:right;">
+25.96154
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Emma
+</td>
+<td style="text-align:right;">
+0.4393939
+</td>
+<td style="text-align:right;">
+0.3333333
+</td>
+<td style="text-align:right;">
+0.1060606
+</td>
+<td style="text-align:right;">
+24.13793
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Frank
+</td>
+<td style="text-align:right;">
+-0.5606061
+</td>
+<td style="text-align:right;">
+-0.4166667
+</td>
+<td style="text-align:right;">
+0.1439394
+</td>
+<td style="text-align:right;">
+25.67568
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Grace
+</td>
+<td style="text-align:right;">
+0.3977273
+</td>
+<td style="text-align:right;">
+0.5000000
+</td>
+<td style="text-align:right;">
+0.1022727
+</td>
+<td style="text-align:right;">
+25.71429
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Henry
+</td>
+<td style="text-align:right;">
+-0.8939394
+</td>
+<td style="text-align:right;">
+-0.6666667
+</td>
+<td style="text-align:right;">
+0.2272727
+</td>
+<td style="text-align:right;">
+25.42373
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Iris
+</td>
+<td style="text-align:right;">
+0.1060606
+</td>
+<td style="text-align:right;">
+0.1666667
+</td>
+<td style="text-align:right;">
+0.0606061
+</td>
+<td style="text-align:right;">
+57.14286
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+Jack
+</td>
+<td style="text-align:right;">
+-0.2272727
+</td>
+<td style="text-align:right;">
+-0.1666667
+</td>
+<td style="text-align:right;">
+0.0606061
+</td>
+<td style="text-align:right;">
+26.66667
+</td>
+</tr>
+</tbody>
+</table>
+<pre class="r"><code>item_bias |&gt;
+  left_join(item_bias_repeat, join_by(Item)) |&gt;
+  mutate(`Absolute Difference` = abs(item_bias_repeat - item_bias),
+         `Percent Difference` = abs(((item_bias_repeat - item_bias) / item_bias)) * 100) |&gt;
+  kbl(caption = &quot;Comparison of Different Sampling on Item Bias&quot;) |&gt;
+  kable_styling(bootstrap_options = c(&quot;striped&quot;, &quot;hover&quot;, &quot;condensed&quot;))</code></pre>
+<table class="table table-striped table-hover table-condensed" style="color: black; margin-left: auto; margin-right: auto;">
+<caption>
+Comparison of Different Sampling on Item Bias
+</caption>
+<thead>
+<tr>
+<th style="text-align:left;">
+Item
+</th>
+<th style="text-align:right;">
+item_bias
+</th>
+<th style="text-align:right;">
+item_bias_repeat
+</th>
+<th style="text-align:right;">
+Absolute Difference
+</th>
+<th style="text-align:right;">
+Percent Difference
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left;">
+A
+</td>
+<td style="text-align:right;">
+0.3352273
+</td>
+<td style="text-align:right;">
+0.2500000
+</td>
+<td style="text-align:right;">
+0.0852273
+</td>
+<td style="text-align:right;">
+25.423729
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+B
+</td>
+<td style="text-align:right;">
+0.5727273
+</td>
+<td style="text-align:right;">
+0.5476190
+</td>
+<td style="text-align:right;">
+0.0251082
+</td>
+<td style="text-align:right;">
+4.383976
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+C
+</td>
+<td style="text-align:right;">
+-0.3939394
+</td>
+<td style="text-align:right;">
+-0.3095238
+</td>
+<td style="text-align:right;">
+0.0844156
+</td>
+<td style="text-align:right;">
+21.428571
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+D
+</td>
+<td style="text-align:right;">
+-0.5844156
+</td>
+<td style="text-align:right;">
+-0.8333333
+</td>
+<td style="text-align:right;">
+0.2489177
+</td>
+<td style="text-align:right;">
+42.592593
+</td>
+</tr>
+<tr>
+<td style="text-align:left;">
+E
+</td>
+<td style="text-align:right;">
+0.1298701
+</td>
+<td style="text-align:right;">
+0.2619048
+</td>
+<td style="text-align:right;">
+0.1320346
+</td>
+<td style="text-align:right;">
+101.666667
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div id="incorporating-regularization" class="section level1">
+<h1>Incorporating Regularization</h1>
+<p>One of the methods we can use to improve the performance of the
+baseline predictors is regularization. By adding a penalty term when
+calculating the user and item bias parameters we can prevent overfitting
+and better stabilize the bias values. It is important to allow the user
+and bias regularization values to vary independently of each other when
+testing, as one set may require more regularization than the other.</p>
+<pre class="r"><code>train_regularized_bias &lt;- function(train_data, lambda_user = 0.1, lambda_item = 0.1, 
+                                       max_iter = 50, tol = 1e-6) {
+  global_mean &lt;- mean(train_data$Rating)
+  
+  # Initialize biases to zero
+  user_biases &lt;- train_data |&gt;
+    distinct(Name) |&gt;
+    mutate(user_bias = 0)
+  
+  item_biases &lt;- train_data |&gt;
+    distinct(Item) |&gt;
+    mutate(item_bias = 0)
+  
+  # Iterative updates
+  for (iter in 1:max_iter) {
+    old_user_biases &lt;- user_biases$user_bias
+    old_item_biases &lt;- item_biases$item_bias
+    
+    # Update user biases
+    user_biases &lt;- train_data |&gt;
+      left_join(item_biases, by = &quot;Item&quot;) |&gt;
+      mutate(residual = Rating - global_mean - item_bias) |&gt;
+      group_by(Name) |&gt;
+      summarise(
+        n_ratings = n(),
+        sum_residuals = sum(residual),
+        .groups = &quot;drop&quot;
+      ) |&gt;
+      mutate(user_bias = sum_residuals / (n_ratings + lambda_user))
+    
+    # Update item biases  
+    item_biases &lt;- train_data |&gt;
+      left_join(user_biases, by = &quot;Name&quot;) |&gt;
+      mutate(residual = Rating - global_mean - user_bias) |&gt;
+      group_by(Item) |&gt;
+      summarise(
+        n_ratings = n(),
+        sum_residuals = sum(residual),
+        .groups = &quot;drop&quot;
+      ) |&gt;
+      mutate(item_bias = sum_residuals / (n_ratings + lambda_item))
+    
+    # Check convergence
+    user_change &lt;- sqrt(mean((user_biases$user_bias - old_user_biases)^2, na.rm = TRUE))
+    item_change &lt;- sqrt(mean((item_biases$item_bias - old_item_biases)^2, na.rm = TRUE))
+    
+    if (user_change &lt; tol &amp;&amp; item_change &lt; tol) {
+      break
+    }
+  }
+  
+  list(
+    global_mean = global_mean,
+    user_biases = user_biases,
+    item_biases = item_biases,
+    lambda_user = lambda_user,
+    lambda_item = lambda_item,
+    iterations = iter
+  )
+}
+
+# Function to make predictions
+predict_ratings &lt;- function(model, data) {
+  data |&gt;
+    left_join(model$user_biases, by = &quot;Name&quot;) |&gt;
+    left_join(model$item_biases, by = &quot;Item&quot;) |&gt;
+    mutate(
+      user_bias = coalesce(user_bias, 0),
+      item_bias = coalesce(item_bias, 0),
+      predicted_rating = model$global_mean + user_bias + item_bias,
+      predicted_rating = pmax(1, pmin(5, predicted_rating)) # Adding floor and ceiling to ratings
+    )
+}
+
+# For training
+calculate_rmse &lt;- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2, na.rm = TRUE))
+}</code></pre>
+<pre class="r"><code># A grid of regularization parameters to try
+lambda_grid &lt;- expand_grid(
+  lambda_user = c(0, 0.01, 0.1, 0.5, 1.0),
+  lambda_item = c(0, 0.01, 0.1, 0.5, 1.0)
+)
+
+results &lt;- lambda_grid |&gt;
+  mutate(
+    model = map2(lambda_user, lambda_item, ~{
+      train_regularized_bias(train_pairs, .x, .y)
+    })
+  ) |&gt;
+  mutate(
+    # Get predictions for train and test
+    train_pred = map(model, ~predict_ratings(.x, train_pairs)),
+    test_pred = map(model, ~predict_ratings(.x, test_pairs)),
+    
+    # Calculate RMSE
+    train_rmse = map_dbl(train_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating)),
+    test_rmse = map_dbl(test_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating))
+  )</code></pre>
+<p>Looking at the results of the regularization process, we can see that
+our predictors actually perform best without any regularization. This is
+not surprising, as the toy dataset constructed for this project is not
+very sparse and has intentional patterns built in. If a larger or
+sparser dataset was used we would expect the addition of regularization
+to have a more meaningful impact on model performance.</p>
+<pre class="r"><code>results |&gt;
+  select(lambda_user, lambda_item, train_rmse, test_rmse) |&gt;
+  arrange(test_rmse) |&gt;
+  head(10) |&gt;
+  kbl(caption = &quot;Top Performing Regularization Values&quot;) |&gt;
+  kable_styling(bootstrap_options = c(&quot;striped&quot;, &quot;hover&quot;, &quot;condensed&quot;))</code></pre>
+<table class="table table-striped table-hover table-condensed" style="color: black; margin-left: auto; margin-right: auto;">
+<caption>
+Top Performing Regularization Values
+</caption>
+<thead>
+<tr>
+<th style="text-align:right;">
+lambda_user
+</th>
+<th style="text-align:right;">
+lambda_item
+</th>
+<th style="text-align:right;">
+train_rmse
+</th>
+<th style="text-align:right;">
+test_rmse
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.2715822
+</td>
+<td style="text-align:right;">
+0.3166312
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.2715830
+</td>
+<td style="text-align:right;">
+0.3168834
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.2715868
+</td>
+<td style="text-align:right;">
+0.3171637
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.2715875
+</td>
+<td style="text-align:right;">
+0.3174135
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.2716607
+</td>
+<td style="text-align:right;">
+0.3192452
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.2716645
+</td>
+<td style="text-align:right;">
+0.3197502
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.2720140
+</td>
+<td style="text-align:right;">
+0.3221532
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.2720140
+</td>
+<td style="text-align:right;">
+0.3223800
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.2720837
+</td>
+<td style="text-align:right;">
+0.3244982
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.2732845
+</td>
+<td style="text-align:right;">
+0.3306648
+</td>
+</tr>
+</tbody>
+</table>
+<p>To demonstrate this, we can construct just such a large and sparse
+dataset. Looking at the results in the table below we can see meaningful
+improvement even in the top 10 best performing regularization parameter
+pairings. The proper regularization parameters prevent the model from
+overfitting, but as we can see from the large jump in RMSE from the
+training and testing sets the baseline predictors still fall victim to
+their tendency to perform poorly for sparse datasets. We could continue
+to attempt to address this issue by adding cross validation and training
+across multiple folds of the data, however, at this point with the
+addition of regularization and cross validation we will have moved into
+the territory of linear regression models and would no longer be using
+global baseline predictors.</p>
+<pre class="r"><code># Creates a large and sparse dataset
+set.seed(8675309)
+create_overfitting_data &lt;- function() {
+  set.seed(123)
+  
+  n_users &lt;- 80
+  n_items &lt;- 60
+  
+  # Create users with extreme biases
+  user_biases &lt;- rnorm(n_users, 0, 1.2)  # Wide range of user biases
+  item_biases &lt;- rnorm(n_items, 0, 0.8)  # Moderate item biases
+  
+  ratings_list &lt;- list()
+  
+  for (i in 1:n_users) {
+    n_user_ratings &lt;- sample(2:4, 1)  # Very few ratings per user
+    user_items &lt;- sample(1:n_items, n_user_ratings)
+    
+    for (j in user_items) {
+      true_rating &lt;- 3.5 + user_biases[i] + item_biases[j] + rnorm(1, 0, 0.4)
+      observed_rating &lt;- pmax(1, pmin(5, round(true_rating * 2) / 2))
+      
+      ratings_list &lt;- append(ratings_list, list(tibble(
+        Name = paste0(&quot;User_&quot;, i),
+        Item = paste0(&quot;Item_&quot;, j),
+        Rating = observed_rating
+      )))
+    }
+  }
+  
+  bind_rows(ratings_list)
+}
+
+# Call creation function
+overfit_df &lt;- create_overfitting_data()
+
+# Make a train-test split
+overfit_train_index &lt;- createDataPartition(y = 1:nrow(overfit_df),
+                                           p = 0.8,
+                                           list = FALSE)
+
+overfit_train_pairs &lt;- overfit_df[overfit_train_index,]
+overfit_test_pairs &lt;- overfit_df[-overfit_train_index,]
+
+# Train on the overfitting-prone dataset
+overfit_results &lt;- lambda_grid |&gt;
+  mutate(
+    model = map2(lambda_user, lambda_item, ~{
+      train_regularized_bias(overfit_train_pairs, .x, .y)
+    })
+  ) |&gt;
+  mutate(
+    # Get predictions for train and test
+    train_pred = map(model, ~predict_ratings(.x, overfit_train_pairs)),
+    test_pred = map(model, ~predict_ratings(.x, overfit_test_pairs)),
+    
+    # Calculate RMSE
+    train_rmse = map_dbl(train_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating)),
+    test_rmse = map_dbl(test_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating))
+  )
+
+overfit_results |&gt;
+  select(lambda_user, lambda_item, train_rmse, test_rmse) |&gt;
+  arrange(test_rmse) |&gt;
+  head(10) |&gt;
+  kbl(caption = &quot;Top Performing Regularization Values on the Overfitting-Prone Dataset&quot;) |&gt;
+  kable_styling(bootstrap_options = c(&quot;striped&quot;, &quot;hover&quot;, &quot;condensed&quot;))</code></pre>
+<table class="table table-striped table-hover table-condensed" style="color: black; margin-left: auto; margin-right: auto;">
+<caption>
+Top Performing Regularization Values on the Overfitting-Prone Dataset
+</caption>
+<thead>
+<tr>
+<th style="text-align:right;">
+lambda_user
+</th>
+<th style="text-align:right;">
+lambda_item
+</th>
+<th style="text-align:right;">
+train_rmse
+</th>
+<th style="text-align:right;">
+test_rmse
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.2442995
+</td>
+<td style="text-align:right;">
+0.6653811
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.2969028
+</td>
+<td style="text-align:right;">
+0.6802588
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.2080561
+</td>
+<td style="text-align:right;">
+0.6808387
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.2378117
+</td>
+<td style="text-align:right;">
+0.6875802
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.00
+</td>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.2374046
+</td>
+<td style="text-align:right;">
+0.6913835
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+1.00
+</td>
+<td style="text-align:right;">
+0.2826375
+</td>
+<td style="text-align:right;">
+0.6980052
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.2753319
+</td>
+<td style="text-align:right;">
+0.7007383
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.50
+</td>
+<td style="text-align:right;">
+1.00
+</td>
+<td style="text-align:right;">
+0.3251385
+</td>
+<td style="text-align:right;">
+0.7011162
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+1.00
+</td>
+<td style="text-align:right;">
+0.2783954
+</td>
+<td style="text-align:right;">
+0.7165237
+</td>
+</tr>
+<tr>
+<td style="text-align:right;">
+0.10
+</td>
+<td style="text-align:right;">
+0.01
+</td>
+<td style="text-align:right;">
+0.2022665
+</td>
+<td style="text-align:right;">
+0.7172480
+</td>
+</tr>
+</tbody>
+</table>
+</div>
 
 
 

@@ -14,6 +14,8 @@ library(caret)
 library(kableExtra)
 ```
 
+# Creating A Dataset
+
 The dataset for this project will be a toy dataset representing product reviews of 5 different products labeled "A" through "E" by different users. The users and products have varying numbers of missing reviews, and the review values themselves are designed to reflect the tendency of people to avoid the bottom range of values in rating scales. The scale ranges from 0-5 and allows for half steps in the ratings. We will be building a simple recommender that will generate product recommendations for users.
 
 ```{r make dataset}
@@ -58,6 +60,8 @@ train_pairs <- long_df[train_index,]
 test_pairs <- long_df[-train_index,]
 ```
 
+# Calculating Averages
+
 We can see the averages of each user's ratings as well as each item's average rating in the below tables. The averages are from the data in the training set only.
 
 ```{r averages}
@@ -97,6 +101,8 @@ rmse_df |>
   kbl(caption = "RMSE of Predicted Ratings") |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
 ```
+
+# Incorporating User and Item Bias
 
 To improve performance we can calculate the bias of each user and item to construct baseline predictors for the different user-item pairs. The bias is how much the average rating of each item or user differs from the average of the entire dataset, which we can use to adjust our estimates for each user-item pair.
 
@@ -150,6 +156,8 @@ rmse_df |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
 ```
 
+# Analyzing Baseline Predictor Performance
+
 While the baseline predictors see a significant improvement in accuracy as measured by RMSE, the performance on the testing set is still not stellar at almost a half step in the rating scale. While baseline predictors are an improvement on simple averages, they have several shortcomings. They are vulnerable to missingness, and as a result different samples of the data can have very different bias values. The tables below demonstrate this phenomena, comparing the bias values of the original sample to a new sample of the data and as we can see from the bias difference of Carol and Item E the swings due to sampling and missingness can be extreme. Additionally, simple bias adjustments do not capture more nuanced relationships in the data such as similarities between users or items which could improve estimates in situations where data is scarce.
 
 ```{r split two}
@@ -193,4 +201,202 @@ item_bias |>
   kbl(caption = "Comparison of Different Sampling on Item Bias") |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
 ```
+
+# Incorporating Regularization
+
+One of the methods we can use to improve the performance of the baseline predictors is regularization. By adding a penalty term when calculating the user and item bias parameters we can prevent overfitting and better stabilize the bias values. It is important to allow the user and bias regularization values to vary independently of each other when testing, as one set may require more regularization than the other.
+
+```{r regularization function}
+train_regularized_bias <- function(train_data, lambda_user = 0.1, lambda_item = 0.1, 
+                                       max_iter = 50, tol = 1e-6) {
+  global_mean <- mean(train_data$Rating)
+  
+  # Initialize biases to zero
+  user_biases <- train_data |>
+    distinct(Name) |>
+    mutate(user_bias = 0)
+  
+  item_biases <- train_data |>
+    distinct(Item) |>
+    mutate(item_bias = 0)
+  
+  # Iterative updates
+  for (iter in 1:max_iter) {
+    old_user_biases <- user_biases$user_bias
+    old_item_biases <- item_biases$item_bias
+    
+    # Update user biases
+    user_biases <- train_data |>
+      left_join(item_biases, by = "Item") |>
+      mutate(residual = Rating - global_mean - item_bias) |>
+      group_by(Name) |>
+      summarise(
+        n_ratings = n(),
+        sum_residuals = sum(residual),
+        .groups = "drop"
+      ) |>
+      mutate(user_bias = sum_residuals / (n_ratings + lambda_user))
+    
+    # Update item biases  
+    item_biases <- train_data |>
+      left_join(user_biases, by = "Name") |>
+      mutate(residual = Rating - global_mean - user_bias) |>
+      group_by(Item) |>
+      summarise(
+        n_ratings = n(),
+        sum_residuals = sum(residual),
+        .groups = "drop"
+      ) |>
+      mutate(item_bias = sum_residuals / (n_ratings + lambda_item))
+    
+    # Check convergence
+    user_change <- sqrt(mean((user_biases$user_bias - old_user_biases)^2, na.rm = TRUE))
+    item_change <- sqrt(mean((item_biases$item_bias - old_item_biases)^2, na.rm = TRUE))
+    
+    if (user_change < tol && item_change < tol) {
+      break
+    }
+  }
+  
+  list(
+    global_mean = global_mean,
+    user_biases = user_biases,
+    item_biases = item_biases,
+    lambda_user = lambda_user,
+    lambda_item = lambda_item,
+    iterations = iter
+  )
+}
+
+# Function to make predictions
+predict_ratings <- function(model, data) {
+  data |>
+    left_join(model$user_biases, by = "Name") |>
+    left_join(model$item_biases, by = "Item") |>
+    mutate(
+      user_bias = coalesce(user_bias, 0),
+      item_bias = coalesce(item_bias, 0),
+      predicted_rating = model$global_mean + user_bias + item_bias,
+      predicted_rating = pmax(1, pmin(5, predicted_rating)) # Adding floor and ceiling to ratings
+    )
+}
+
+# For training
+calculate_rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2, na.rm = TRUE))
+}
+```
+
+```{r regularizing predictors}
+# A grid of regularization parameters to try
+lambda_grid <- expand_grid(
+  lambda_user = c(0, 0.01, 0.1, 0.5, 1.0),
+  lambda_item = c(0, 0.01, 0.1, 0.5, 1.0)
+)
+
+results <- lambda_grid |>
+  mutate(
+    model = map2(lambda_user, lambda_item, ~{
+      train_regularized_bias(train_pairs, .x, .y)
+    })
+  ) |>
+  mutate(
+    # Get predictions for train and test
+    train_pred = map(model, ~predict_ratings(.x, train_pairs)),
+    test_pred = map(model, ~predict_ratings(.x, test_pairs)),
+    
+    # Calculate RMSE
+    train_rmse = map_dbl(train_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating)),
+    test_rmse = map_dbl(test_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating))
+  )
+```
+
+Looking at the results of the regularization process, we can see that our predictors actually perform best without any regularization. This is not surprising, as the toy dataset constructed for this project is not very sparse and has intentional patterns built in. If a larger or sparser dataset was used we would expect the addition of regularization to have a more meaningful impact on model performance.
+
+```{r regularization results}
+results |>
+  select(lambda_user, lambda_item, train_rmse, test_rmse) |>
+  arrange(test_rmse) |>
+  head(10) |>
+  kbl(caption = "Top Performing Regularization Values") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+To demonstrate this, we can construct just such a large and sparse dataset. Looking at the results in the table below we can see meaningful improvement even in the top 10 best performing regularization parameter pairings. The proper regularization parameters prevent the model from overfitting, but as we can see from the large jump in RMSE from the training and testing sets the baseline predictors still fall victim to their tendency to perform poorly for sparse datasets. We could continue to attempt to address this issue by adding cross validation and training across multiple folds of the data, however, at this point with the addition of regularization and cross validation we will have moved into the territory of linear regression models and would no longer be using global baseline predictors.
+
+```{r overfitting prone data}
+# Creates a large and sparse dataset
+set.seed(8675309)
+create_overfitting_data <- function() {
+  set.seed(123)
+  
+  n_users <- 80
+  n_items <- 60
+  
+  # Create users with extreme biases
+  user_biases <- rnorm(n_users, 0, 1.2)  # Wide range of user biases
+  item_biases <- rnorm(n_items, 0, 0.8)  # Moderate item biases
+  
+  ratings_list <- list()
+  
+  for (i in 1:n_users) {
+    n_user_ratings <- sample(2:4, 1)  # Very few ratings per user
+    user_items <- sample(1:n_items, n_user_ratings)
+    
+    for (j in user_items) {
+      true_rating <- 3.5 + user_biases[i] + item_biases[j] + rnorm(1, 0, 0.4)
+      observed_rating <- pmax(1, pmin(5, round(true_rating * 2) / 2))
+      
+      ratings_list <- append(ratings_list, list(tibble(
+        Name = paste0("User_", i),
+        Item = paste0("Item_", j),
+        Rating = observed_rating
+      )))
+    }
+  }
+  
+  bind_rows(ratings_list)
+}
+
+# Call creation function
+overfit_df <- create_overfitting_data()
+
+# Make a train-test split
+overfit_train_index <- createDataPartition(y = 1:nrow(overfit_df),
+                                           p = 0.8,
+                                           list = FALSE)
+
+overfit_train_pairs <- overfit_df[overfit_train_index,]
+overfit_test_pairs <- overfit_df[-overfit_train_index,]
+
+# Train on the overfitting-prone dataset
+overfit_results <- lambda_grid |>
+  mutate(
+    model = map2(lambda_user, lambda_item, ~{
+      train_regularized_bias(overfit_train_pairs, .x, .y)
+    })
+  ) |>
+  mutate(
+    # Get predictions for train and test
+    train_pred = map(model, ~predict_ratings(.x, overfit_train_pairs)),
+    test_pred = map(model, ~predict_ratings(.x, overfit_test_pairs)),
+    
+    # Calculate RMSE
+    train_rmse = map_dbl(train_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating)),
+    test_rmse = map_dbl(test_pred, ~calculate_rmse(.x$Rating, .x$predicted_rating))
+  )
+
+overfit_results |>
+  select(lambda_user, lambda_item, train_rmse, test_rmse) |>
+  arrange(test_rmse) |>
+  head(10) |>
+  kbl(caption = "Top Performing Regularization Values on the Overfitting-Prone Dataset") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+
+
+
+
 
