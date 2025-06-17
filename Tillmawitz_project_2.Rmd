@@ -1,0 +1,678 @@
+---
+title: "Data 612 Project 2"
+author: "Matthew Tillmawitz"
+date: "2025-06-15"
+output: 
+  rmdformats::readthedown:
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(recommenderlab)
+library(Matrix)
+library(dplyr)
+library(doParallel)
+library(parallel)
+library(foreach)
+library(recommenderlabJester)
+library(ggplot2)
+library(gridExtra)
+library(viridis)
+library(kableExtra)
+library(patchwork)
+
+# Configure parallel processing
+num_cores <- detectCores() - 1
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Create cache directory, for storing trained models
+cache_dir <- "cf_model_cache"
+if (!dir.exists(cache_dir)) {
+  dir.create(cache_dir)
+}
+```
+
+# Introduction
+
+For this project we will be comparing user-user collaborative filtering models with item-item collaborative filtering models on the [Jester dataset from UC Berkeley](https://eigentaste.berkeley.edu/dataset/). We will be using the recommenderlab library to train the models and compare the results of various tuning methods such as the similarity metric, neighborhood sizes, and normalization methods.
+
+# Exploratory Data Analysis
+
+```{r basic analysis}
+data("Jester")
+sparse_matrix <- Jester@data
+
+n_ratings <- length(sparse_matrix@x)
+
+basic_summary <- data.frame(
+  Metric = c("Number of Users", "Number of Items", "Total Ratings", 
+             "Sparsity (%)", "Density (%)"),
+  Value = c(nrow(Jester),
+            ncol(Jester),
+            n_ratings,
+            round((1 - n_ratings / (nrow(Jester) * ncol(Jester))) * 100, 2),
+            round((n_ratings / (nrow(Jester) * ncol(Jester))) * 100, 2))
+)
+
+rating_stats_df <- data.frame(
+  Statistic = c("Mean", "Median", "Std Dev", 
+                "Minimum", "Maximum", "Q1", "Q3"),
+  Value = c(round(mean(sparse_matrix@x), 3),
+            round(median(sparse_matrix@x), 3),
+            round(sd(sparse_matrix@x), 3),
+            round(min(sparse_matrix@x), 3),
+            round(max(sparse_matrix@x), 3),
+            round(quantile(sparse_matrix@x, 0.25), 3),
+            round(quantile(sparse_matrix@x, 0.75), 3))
+)
+```
+
+We can see there are significantly more users than there are jokes, which will henceforth be referred to as items for simplicity. The dataset is actually very dense compared to more traditional datasets for recommender systems. While there are other methods we could use that would make better use of the density of the dataset we will stick to the previously mentioned models as per the assignment.
+
+```{r basic table}
+basic_summary |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+The mean and median are very close to 0 given the total value range of -10 to 10. This indicates the ratings are likely relatively centered, with a slight left skew given the difference in median and mean values. The first and third quantile values lend further support to a left skew being present.
+
+```{r detailed stats}
+rating_stats_df |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+When we plot the ratings in a histogram we can see the left skew is indeed present, but the data overall is fairly uniformly distributed which is unexpected.
+
+```{r load data}
+hist(getRatings(Jester), breaks = 50, 
+     main = "Distribution of Joke Ratings", 
+     xlab = "Rating", ylab = "Frequency")
+```
+
+Instead of the traditional train/test split we will be dividing the data into three sets called train, test known, and test unknown. This split is commonly used for recommender systems to avoid the cold start problem when evaluating the models. The two test sets allow us to show the model some known ratings and ask for the unknown ratings from a given user.
+
+```{r split dataset}
+set.seed(8675309)
+eval_scheme <- evaluationScheme(Jester, 
+                               method = "split", 
+                               train = 0.8, 
+                               given = 15,
+                               goodRating = 5)
+
+train_data <- getData(eval_scheme, "train")
+test_known <- getData(eval_scheme, "known")
+test_unknown <- getData(eval_scheme, "unknown")
+```
+
+# Model Training Functions
+
+The model training process is easily parallelized and as a result much of the logic works best broken into functions. The functions are defined in this section, and the analysis will continue in the next section.
+
+Functions for caching and loading models/results to allow for quicker editing of non-modeling code and formatting.
+
+```{r caching functions}
+# Create unique hash of parameter combinations
+create_param_hash <- function(method, params) {
+  param_string <- paste(method, paste(names(params), params, collapse = "_"), sep = "_")
+  return(digest::md5(param_string))
+}
+
+# Function to save model results
+save_model_results <- function(results, filename) {
+  filepath <- file.path(cache_dir, paste0(filename, ".rds"))
+  saveRDS(results, filepath)
+  cat("Saved results to:", filepath, "\n")
+}
+
+# Function to load cached results
+load_cached_results <- function(filename) {
+  filepath <- file.path(cache_dir, paste0(filename, ".rds"))
+  if (file.exists(filepath)) {
+    return(readRDS(filepath))
+  }
+  return(NULL)
+}
+```
+
+A function to train and evaluate a recommender model, allows for easy parallelization when training models.
+
+```{r evaluate models}
+evaluate_model_parallel <- function(config, train_data, eval_scheme) {
+  method <- config$method
+  params <- config$params
+  
+  result <- tryCatch({
+    # Basic modeling steps
+    model <- Recommender(train_data, method = method, parameter = params)
+    predictions <- predict(model, getData(eval_scheme, "known"), type = "ratings")
+    accuracy <- calcPredictionAccuracy(predictions, getData(eval_scheme, "unknown"))
+    
+    data.frame(
+      method = method,
+      parameters = toString(params),
+      RMSE = accuracy["RMSE"],
+      MAE = accuracy["MAE"],
+      stringsAsFactors = FALSE
+    )
+  }, error = function(e) {
+    data.frame(
+      method = method,
+      parameters = toString(params),
+      RMSE = NA,
+      MAE = NA,
+      error = e$message,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  return(result)
+}
+```
+
+Exporting the custom functions for use by the parallelized clusters.
+
+```{r export custom functions}
+clusterExport(cl, c("evaluate_model_parallel", "load_cached_results", "save_model_results"))
+```
+
+The majority of the logic for model training exists in this function. Used for both user-user and item-item models to cut down on repeated code. The default values for passed parameters are used when the function is called later, and are included to aid with debugging as the function was developed. Results are cached at the end of the training to allow for quicker iteration of analysis.
+
+```{r tuning function}
+cf_grid_search <- function(train_data, eval_scheme, method = "UBCF", 
+                          similarity_methods = c("cosine", "pearson", "jaccard"),
+                          neighbor_k_values = c(10, 20, 30, 40, 50),
+                          sample_sizes = c(0, 50),  # Only used for UBCF
+                          normalize_methods = c("center", "Z-score", NULL),
+                          normalize_row = c(TRUE, FALSE),  # Row vs column normalization
+                          use_cache = TRUE) {
+  
+  # Set cache filename based on method
+  cache_file <- paste0(tolower(method), "_grid_results")
+  
+  # Try to load cached results first
+  if (use_cache) {
+    cached_results <- load_cached_results(cache_file)
+    if (!is.null(cached_results)) {
+      return(cached_results)
+    }
+  }
+  
+  # Create parameter grids based on method
+  if (method == "UBCF") {
+    param_grid <- expand.grid(
+      similarity = similarity_methods,
+      neighbor_k = neighbor_k_values,
+      sample = sample_sizes,
+      normalize = normalize_methods,
+      norm_row = normalize_row,
+      stringsAsFactors = FALSE
+    )
+  } else if (method == "IBCF") {
+    param_grid <- expand.grid(
+      similarity = similarity_methods,
+      neighbor_k = neighbor_k_values,
+      normalize = normalize_methods,
+      norm_row = normalize_row,
+      stringsAsFactors = FALSE
+    )
+    param_grid$sample <- 0  # IBCF doesn't use sampling, set to 0 for consistency
+  } else {
+    stop("Method must be either 'UBCF' or 'IBCF'")
+  }
+  
+  # Prepare configurations for parallel processing
+  configs <- list()
+  for (i in 1:nrow(param_grid)) {
+    params_row <- param_grid[i, ]
+    
+    # Build parameter list based on method
+    if (method == "UBCF") {
+      cf_params <- list(
+        method = params_row$similarity,
+        nn = params_row$neighbor_k  # neighborhood size for UBCF
+      )
+      
+      # Add sample parameter if not using all users
+      if (params_row$sample > 0) {
+        cf_params$sample <- params_row$sample
+      }
+    } else {  # IBCF
+      cf_params <- list(
+        method = params_row$similarity,
+        k = params_row$neighbor_k  # k similar items for IBCF
+      )
+    }
+    
+    # Add normalization if specified (both methods)
+    if (!is.na(params_row$normalize)) {
+      cf_params$normalize <- params_row$normalize
+      cf_params$row <- params_row$norm_row  # TRUE = row normalization, FALSE = column
+    }
+    
+    configs[[i]] <- list(method = method, params = cf_params)
+  }
+  
+  # Run parallel evaluation
+  results_list <- foreach(config = configs, .packages = c("recommenderlab")) %dopar% {
+    evaluate_model_parallel(config, train_data, eval_scheme)
+  }
+  
+  # Combine results
+  results <- do.call(rbind, results_list)
+  
+  # Add original parameter columns for analysis
+  results$similarity <- param_grid$similarity
+  
+  # Add method-specific columns with consistent naming
+  if (method == "UBCF") {
+    results$neighbors <- param_grid$neighbor_k
+    results$sample <- param_grid$sample
+  } else {  # IBCF
+    results$k <- param_grid$neighbor_k
+    results$sample <- 0  # For consistency in analysis functions
+  }
+  
+  results$normalize <- ifelse(is.na(param_grid$normalize), "none", param_grid$normalize)
+  results$norm_row <- param_grid$norm_row
+  results$cf_method <- method
+  
+  # Remove failed configurations
+  results <- results[!is.na(results$RMSE), ]
+  
+  # Cache results
+  if (use_cache) {
+    save_model_results(results, cache_file)
+  }
+  
+  return(results)
+}
+```
+
+Wrapper functions, largely used for development.
+
+```{r wrapper functions}
+ubcf_grid_search <- function(train_data, eval_scheme, 
+                            similarity_methods = c("cosine", "pearson", "jaccard"),
+                            neighborhood_sizes = c(10, 20, 30, 40, 50),
+                            sample_sizes = c(0, 50),
+                            normalize_methods = c("center", "Z-score", NULL),
+                            normalize_row = c(TRUE, FALSE),
+                            use_cache = TRUE) {
+  
+  return(cf_grid_search(train_data, eval_scheme, method = "UBCF",
+                       similarity_methods = similarity_methods,
+                       neighbor_k_values = neighborhood_sizes,
+                       sample_sizes = sample_sizes,
+                       normalize_methods = normalize_methods,
+                       normalize_row = normalize_row,
+                       use_cache = use_cache))
+}
+
+ibcf_grid_search <- function(train_data, eval_scheme,
+                            similarity_methods = c("cosine", "pearson", "jaccard"),
+                            k_values = c(10, 20, 30, 40, 50),
+                            normalize_methods = c("center", "Z-score", NULL),
+                            normalize_row = c(TRUE, FALSE),
+                            use_cache = TRUE) {
+  
+  return(cf_grid_search(train_data, eval_scheme, method = "IBCF",
+                       similarity_methods = similarity_methods,
+                       neighbor_k_values = k_values,
+                       sample_sizes = c(0),  # Not used for IBCF
+                       normalize_methods = normalize_methods,
+                       normalize_row = normalize_row,
+                       use_cache = use_cache))
+}
+```
+
+A generic function for analysis of model results.
+
+```{r results analysis}
+analyze_cf_results <- function(results, method = NULL) {
+  
+  # Determine method from results if not specified
+  if (is.null(method)) {
+    if ("cf_method" %in% colnames(results)) {
+      method <- results$cf_method[1]
+    } else if ("neighbors" %in% colnames(results)) {
+      method <- "UBCF"
+    } else if ("k" %in% colnames(results)) {
+      method <- "IBCF"
+    } else {
+      stop("Cannot determine method type from results")
+    }
+  }
+  
+  cat(paste("\n", method, "RESULTS ANALYSIS\n"))
+  
+  # Sort by RMSE
+  results <- results[order(results$RMSE), ]
+  
+  # Overall best models
+  cat(paste("\nTOP 5", method, "CONFIGURATIONS:\n"))
+  for (i in 1:min(5, nrow(results))) {
+    if (method == "UBCF") {
+      cat(sprintf("%d. %s similarity, %d neighbors, sample=%s, normalize=%s (%s)\n", 
+                  i, results$similarity[i], results$neighbors[i],
+                  ifelse(results$sample[i] == 0, "all", results$sample[i]),
+                  results$normalize[i],
+                  ifelse(results$norm_row[i], "row", "col")))
+    } else {  # IBCF
+      cat(sprintf("%d. %s similarity, k=%d, normalize=%s (%s)\n", 
+                  i, results$similarity[i], results$k[i], 
+                  results$normalize[i],
+                  ifelse(results$norm_row[i], "row", "col")))
+    }
+    cat(sprintf("   RMSE: %.4f, MAE: %.4f\n\n", results$RMSE[i], results$MAE[i]))
+  }
+  
+  # Analysis by similarity method
+  cat("PERFORMANCE BY SIMILARITY METHOD:\n")
+  for (sim in unique(results$similarity)) {
+    sim_results <- results[results$similarity == sim, ]
+    best_sim <- sim_results[1, ]  # Already sorted by RMSE
+    avg_rmse <- mean(sim_results$RMSE)
+    
+    if (method == "UBCF") {
+      cat(sprintf("%s: Best RMSE %.4f (avg: %.4f) with %d neighbors\n", 
+                  toupper(sim), best_sim$RMSE, avg_rmse, best_sim$neighbors))
+    } else {  # IBCF
+      cat(sprintf("%s: Best RMSE %.4f (avg: %.4f) with k=%d\n", 
+                  toupper(sim), best_sim$RMSE, avg_rmse, best_sim$k))
+    }
+  }
+  
+  # Analysis by neighborhood/k size
+  if (method == "UBCF") {
+    cat("\nOPTIMAL NEIGHBORHOOD SIZES:\n")
+    size_analysis <- aggregate(RMSE ~ neighbors, data = results, FUN = mean)
+    size_analysis <- size_analysis[order(size_analysis$RMSE), ]
+    
+    for (i in 1:min(5, nrow(size_analysis))) {
+      cat(sprintf("%d neighbors: Average RMSE %.4f\n", 
+                  size_analysis$neighbors[i], size_analysis$RMSE[i]))
+    }
+  } else {  # IBCF
+    cat("\nOPTIMAL K VALUES:\n")
+    size_analysis <- aggregate(RMSE ~ k, data = results, FUN = mean)
+    size_analysis <- size_analysis[order(size_analysis$RMSE), ]
+    
+    for (i in 1:min(5, nrow(size_analysis))) {
+      cat(sprintf("k=%d: Average RMSE %.4f\n", 
+                  size_analysis$k[i], size_analysis$RMSE[i]))
+    }
+  }
+  
+  # Normalization impact analysis
+  if (length(unique(results$normalize)) > 1) {
+    cat("\nNORMALIZATION METHOD IMPACT:\n")
+    norm_analysis <- aggregate(RMSE ~ normalize, data = results, FUN = mean)
+    norm_analysis <- norm_analysis[order(norm_analysis$RMSE), ]
+    
+    for (i in 1:nrow(norm_analysis)) {
+      cat(sprintf("%s: Average RMSE %.4f\n", 
+                  norm_analysis$normalize[i], norm_analysis$RMSE[i]))
+    }
+  }
+  
+  # Row vs Column normalization comparison
+  if ("norm_row" %in% colnames(results) && length(unique(results$norm_row)) > 1) {
+    cat("\nROW vs COLUMN NORMALIZATION COMPARISON:\n")
+    
+    # Overall comparison
+    row_norm_results <- results[results$norm_row == TRUE, ]
+    col_norm_results <- results[results$norm_row == FALSE, ]
+    
+    if (nrow(row_norm_results) > 0 && nrow(col_norm_results) > 0) {
+      row_mean_rmse <- mean(row_norm_results$RMSE)
+      col_mean_rmse <- mean(col_norm_results$RMSE)
+      
+      cat(sprintf("Row normalization: Average RMSE %.4f (%d configurations)\n", 
+                  row_mean_rmse, nrow(row_norm_results)))
+      cat(sprintf("Column normalization: Average RMSE %.4f (%d configurations)\n", 
+                  col_mean_rmse, nrow(col_norm_results)))
+      
+      if (row_mean_rmse < col_mean_rmse) {
+        improvement <- ((col_mean_rmse - row_mean_rmse) / col_mean_rmse) * 100
+        cat(sprintf("→ Row normalization performs %.2f%% better on average\n", improvement))
+      } else {
+        improvement <- ((row_mean_rmse - col_mean_rmse) / row_mean_rmse) * 100
+        cat(sprintf("→ Column normalization performs %.2f%% better on average\n", improvement))
+      }
+      
+    }
+  }
+  
+  return(results)
+}
+```
+
+More wrappers mostly used for development.
+
+```{r evaluation wrappers}
+analyze_ubcf_results <- function(results) {
+  return(analyze_cf_results(results, method = "UBCF"))
+}
+
+analyze_ibcf_results <- function(results) {
+  return(analyze_cf_results(results, method = "IBCF"))
+}
+```
+
+A function to format a printout of a comparison between the ibcf and ubcf optimal models.
+
+```{r compare user and item models}
+compare_ubcf_ibcf <- function(ubcf_results, ibcf_results) {
+  cat("\nUBCF vs IBCF COMPARISON\n")
+  
+  # Get best from each
+  best_ubcf <- ubcf_results[1, ]
+  best_ibcf <- ibcf_results[1, ]
+  
+  cat("BEST UBCF MODEL:\n")
+  cat(sprintf("  %s similarity, %d neighbors, normalize=%s\n", 
+              best_ubcf$similarity, best_ubcf$neighbors, best_ubcf$normalize))
+  cat(sprintf("  RMSE: %.4f, MAE: %.4f\n\n", best_ubcf$RMSE, best_ubcf$MAE))
+  
+  cat("BEST IBCF MODEL:\n")
+  cat(sprintf("  %s similarity, k=%d, normalize=%s\n", 
+              best_ibcf$similarity, best_ibcf$k, best_ibcf$normalize))
+  cat(sprintf("  RMSE: %.4f, MAE: %.4f\n\n", best_ibcf$RMSE, best_ibcf$MAE))
+  
+  # Determine winner
+  if (best_ubcf$RMSE < best_ibcf$RMSE) {
+    cat("Best performing model: User-Based Collaborative Filtering\n")
+    cat(sprintf("UBCF achieves %.4f RMSE vs IBCF's %.4f RMSE\n", 
+                best_ubcf$RMSE, best_ibcf$RMSE))
+    return("UBCF")
+  } else {
+    cat("Best performing model: Item-Based Collaborative Filtering\n")
+    cat(sprintf("IBCF achieves %.4f RMSE vs UBCF's %.4f RMSE\n", 
+                best_ibcf$RMSE, best_ubcf$RMSE))
+    return("IBCF")
+  }
+}
+```
+
+A function to fetch and build the best performing user and item based models.
+
+```{r get best models}
+# Function to build and cache the best models (unified)
+build_best_models <- function(train_data, ubcf_results, ibcf_results, use_cache = TRUE) {
+  
+  # Check for cached models
+  ubcf_model_file <- "best_ubcf_model"
+  ibcf_model_file <- "best_ibcf_model"
+  
+  if (use_cache) {
+    cached_ubcf <- load_cached_results(ubcf_model_file)
+    cached_ibcf <- load_cached_results(ibcf_model_file)
+    
+    if (!is.null(cached_ubcf) && !is.null(cached_ibcf)) {
+      return(list(ubcf = cached_ubcf, ibcf = cached_ibcf))
+    }
+  }
+  
+  # Get best configurations
+  best_ubcf_config <- ubcf_results[1, ]
+  best_ibcf_config <- ibcf_results[1, ]
+  
+  # Build UBCF model
+  ubcf_params <- list(
+    method = best_ubcf_config$similarity,
+    nn = best_ubcf_config$neighbors
+  )
+  if (best_ubcf_config$sample > 0) {
+    ubcf_params$sample <- best_ubcf_config$sample
+  }
+  if (best_ubcf_config$normalize != "none") {
+    ubcf_params$normalize <- best_ubcf_config$normalize
+  }
+  
+  ubcf_model <- Recommender(train_data, method = "UBCF", parameter = ubcf_params)
+  
+  # Build IBCF model
+  ibcf_params <- list(
+    method = best_ibcf_config$similarity,
+    k = best_ibcf_config$k
+  )
+  if (best_ibcf_config$normalize != "none") {
+    ibcf_params$normalize <- best_ibcf_config$normalize
+  }
+  
+  ibcf_model <- Recommender(train_data, method = "IBCF", parameter = ibcf_params)
+  
+  # Cache models
+  if (use_cache) {
+    save_model_results(ubcf_model, ubcf_model_file)
+    save_model_results(ibcf_model, ibcf_model_file)
+  }
+  
+  return(list(ubcf = ubcf_model, ibcf = ibcf_model))
+}
+```
+
+# Model Results
+
+Looking at the top 5 performing UBCF by RMSE, we can see the user-user models tend to perform best with larger neighborhoods with pearson and cosine similarity methods performing meaningfully better than jaccard models. It is likely we would see further improvement with larger neighborhoods as which is not surprising given the density of the dataset.
+
+```{r user model performance}
+ubcf_results <- ubcf_grid_search(
+  train_data, 
+  eval_scheme,
+  similarity_methods = c("cosine", "pearson", "jaccard"),
+  neighborhood_sizes = c(10, 20, 30, 40, 50),
+  sample_sizes = c(0, 50),
+  normalize_methods = c("center", "Z-score", NULL),
+  normalize_row = c(TRUE, FALSE),
+  use_cache = TRUE
+)
+
+# Analysis of UBCF results
+ubcf_final <- analyze_ubcf_results(ubcf_results)
+```
+
+The item-item models saw more separation based on distance measure, with jaccard similarity performing significantly worse than the other distance metrics. As with the user-user model larger K values saw better performance, again as we would expect from the density of the dataset.
+
+```{r item model performance}
+ibcf_results <- ibcf_grid_search(
+  train_data,
+  eval_scheme, 
+  similarity_methods = c("cosine", "pearson", "jaccard"),
+  k_values = c(10, 20, 30, 40, 50),
+  normalize_methods = c("center", "Z-score", NULL),
+  normalize_row = c(TRUE, FALSE),
+  use_cache = TRUE
+)
+
+ibcf_final <- analyze_ibcf_results(ibcf_results)
+```
+
+For both model types the normalization method did not have a significant impact on performance. Neither the normalization method nor the direction changed the average RMSE of models by a meaningful amount. As mentioned in the EDA, the joke ratings are fairly uniform so we would expect normalization to have little effect.
+
+Comparing the optimal user and item models, we can see they perform very similarly. The UBCF model performs slightly better on the test set, and would therefore be the recommended model in a real world scenario if choosing between the two examined model classes. Given the density of the dataset, memory based approaches could likely improve performance significantly.
+
+```{r compare best models}
+winner <- compare_ubcf_ibcf(ubcf_final, ibcf_final)
+```
+
+Finally, examining the impact of the different tuning parameters, we can see that the most significant parameter was the neighborhood size or k value depending on model class. The similarity measure did have a significant impact on the IBCF model, as the jaccard distance resulted in one of the largest performance differences observed. Interestingly this was not seen in the UBCF model, where the different distance measures saw little performance variation especially for large neighborhoods/k values.
+
+```{r plot final results, fig.height=8, fig.width=10, warning=FALSE, message=FALSE}
+ubcf_plot_data <- ubcf_final |>
+  mutate(method = "UBCF", 
+         size_param = neighbors,
+         # Fix NULL handling in normalize column
+         normalize = ifelse(is.na(normalize) | normalize == "none", "none", as.character(normalize)),
+         norm_type = paste(normalize, ifelse(norm_row, "(row)", "(col)"), sep=" "))
+
+ibcf_plot_data <- ibcf_final |>
+  mutate(method = "IBCF", 
+         size_param = k,
+         # Fix NULL handling in normalize column
+         normalize = ifelse(is.na(normalize) | normalize == "none", "none", as.character(normalize)),
+         norm_type = paste(normalize, ifelse(norm_row, "(row)", "(col)"), sep=" "))
+
+combined_data <- rbind(
+  ubcf_plot_data |> select(method, similarity, size_param, RMSE, MAE, norm_type, normalize),
+  ibcf_plot_data |> select(method, similarity, size_param, RMSE, MAE, norm_type, normalize)
+)
+
+p1 <- combined_data |>
+  group_by(method, similarity) |>
+  summarise(mean_RMSE = mean(RMSE), .groups = 'drop') |>
+  ggplot(aes(x = similarity, y = mean_RMSE, fill = method)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  scale_fill_viridis_d(name = "Algorithm") +
+  labs(title = "Average RMSE by Similarity Method",
+       subtitle = "Comparing UBCF vs IBCF",
+       x = "Similarity Method", y = "RMSE") +
+  theme_minimal()
+
+p2 <- combined_data |>
+  ggplot(aes(x = size_param, y = RMSE, color = method)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "loess", se = TRUE, alpha = 0.2) +
+  facet_wrap(~similarity, scales = "free_x") +
+  scale_color_viridis_d(name = "Algorithm") +
+  labs(title = "RMSE vs Neighborhood/K Size",
+       subtitle = "By similarity method",
+       x = "Neighborhood Size / K Value", y = "RMSE") +
+  theme_minimal()
+
+p3 <- combined_data |>
+  filter(normalize != "none") |>
+  ggplot(aes(x = norm_type, y = RMSE, fill = method)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_viridis_d(name = "Algorithm") +
+  labs(title = "Normalization Impact on RMSE",
+       subtitle = "Row vs Column normalization",
+       x = "Normalization Type", y = "RMSE") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Combine with unified legend
+layout <- (p1 + p3) / p2 + 
+  plot_layout(heights = c(1, 1.5), guides = "collect") &
+  theme(legend.position = "bottom")
+
+layout
+```
+
+```{r stop cluster}
+stopCluster(cl)
+```
+
+
+
+
+
+
+
+
+
+
