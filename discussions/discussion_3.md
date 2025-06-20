@@ -1,0 +1,31 @@
+# Research Discussion Assignment 3
+
+## Prompt
+
+Below is the discussion prompt for this response, included for completeness.
+
+As more systems and sectors are driven by predictive analytics, there is increasing awareness of the possibility and pitfalls of algorithmic discrimination. In what ways do you think Recommender Systems reinforce human bias? Reflecting on the techniques we have covered, do you think recommender systems reinforce or help to prevent unethical targeting or customer segmentation?  Please provide one or more examples to support your arguments.
+
+A few resources:
+
+Evan Estola (2016): [When Recommendations Systems Go Bad](https://www.youtube.com/watch?v=MqoRzNhrTnQ); [MLconf SEA 2016](https://www.youtube.com/watch?v=MqoRzNhrTnQ)
+
+Rishabh Jain (2016): [When Recommendation Systems Go Bad](http://cds.nyu.edu/recommendation-systems-go-bad-%E2%80%A8/)
+(note the above link appears to be broken, but is included for completeness)
+
+Moritz Hardt, Eric Price, Nathan Srebro (2016):  [Equality of Opportunity in Supervised Learning](https://arxiv.org/pdf/1610.02413.pdf)
+
+An additional resource was shared in response to the issues accessing the piece by Jain:
+https://hbr.org/2024/01/why-algorithm-generated-recommendations-fall-short?utm_source=chatgpt.com
+
+## Response
+
+### Discussion 3 - Matthew Tillmawitz
+
+Traditional recommender systems inherently reinforce existing biases due to their fundamental design. Item- and content-based systems produce reccomendations for things similar to what users already consume, while user-based systems suggest what similar users prefer. Neither is intended to produce recommendations meaningfully different from what users are already consuming and as a result simply preserve the inertia inherent to our existing pattern of behavior. Without mechanisms to address changes in preferences over time traditional recommenders are brittle and slow to adjust to changes in behavior resulting in systems which reinforce habitual consumption. The same mechanisms that reinforce habitual consumption also reinforce whatever biases exist in user behavior, whether relatively benign preferences like favoring spicy food or more concerning tendencies toward racist or extremist content.
+
+The work by Moritz, Price, and Srebro offers a particularly compelling method of addressing the issue of bias in recommenders. Many of the techniques for addressing bias I am familiar with attempt to completely exclude variables such as race or gender and by extension any variables that could be used as proxies. As Moritz et al. demonstrate, this exclusion approach often backfires. Attempting to eliminate protected predictors can produce unintended consequences, frequently results in worse-performing models, and often fails to fully address the underlying bias issues. Their approach of explicitly including the potentially bias-inducing variables then controlling for the bias via post-processing is a very clever method that allows for otherwise meaningful predictors which may happen to be usable as proxies for protected classes to remain in the model. The methods they developed to quantify such nebulous concepts as "bias" and "fairness" were also very clever and seem to produce results that are indeed fair. Their method of addressing bias performed impressively while still allowing for the application of nuanced, domain-specific knowledge or adjustments where needed.
+
+To provide an example of why this is so important we can imagine a recommender for social media groups. A naive approach which considered race or potential proxies would likely begin to sort users along racial lines, which is clearly undesirable especially when trying to reduce bias. However, what about diaspora communities? Recent global conflicts such as the wars in Syria and Ukraine have created large refugee populations in Europe and elsewhere. In this context, recommending diaspora community groups based on ethnicity could provide valuable connections for sharing news, cultural events, and mutual support. The post-processing approach developed by Moritz et al. provides a mechanism to allow for a nuanced application of ethnicity to link these diaspora communities while preventing recommendations for supremacist groups or other discriminatiory content.
+
+The Harvard Business Review article by Morewedge touched on the other issue I mentioned earlier, recommenders' failure to adapt to behavioral changes over time. The example of smokers wanting to quit while receiving constant smoking product recommendations illustrates this temporal blindness perfectly. I am aware of some attempts to include time as a data point in recommenders, such as the age of a review, but many of these methods are relatively simple variations of moving averages or exponential decay. There may, of course, be more sophisticated methods I am unfamiliar with, but more intrigueing to me is the potential application of transformer neural networks to this kind of problem. The typical matrix structure of recommender data combined with the need to track temporal changes appears uniquely suited to TNNs and their attention mechanisms. The tradeoff is, of course, explainability when dealing with neural networks which means there is the potential of bias to be reintroduced. However, as Moritz et al. demonstrated, bias can be evaluated after scoring and post-processing techniques can effectively address these emerging biases. The combination of TNNs and bias-mitigating post-processing is an exciting approach to addressing issues of bias and recommendation quality. While these advances don't completely solve the "filter bubble" problem, the combination of more nuanced recommendations with robust bias mitigation could significantly improve the landscape. By thoughtfully incorporating protected characteristics and applying temporal awareness, we can develop recommendation systems that are both more effective and more equitable and may even begin to break us out of the content bubbles we have trapped ourselves in.
