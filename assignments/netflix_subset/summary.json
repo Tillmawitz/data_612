@@ -1,0 +1,18 @@
+{
+  "total_ratings": 100000,
+  "unique_users": 995,
+  "unique_movies": 5814,
+  "rating_distribution": {
+    "1": 4311,
+    "2": 10156,
+    "3": 29962,
+    "4": 34122,
+    "5": 21449
+  },
+  "date_range": {
+    "min_date": "1999-12-09",
+    "max_date": "2005-12-31"
+  },
+  "avg_ratings_per_user": 100.50251256281408,
+  "avg_ratings_per_movie": 17.19986240110079
+}
